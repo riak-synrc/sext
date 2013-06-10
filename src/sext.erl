@@ -18,6 +18,7 @@
 %% @doc Sortable serialization library
 %% @end
 -module(sext).
+-on_load(nif_mode/0).
 
 -export([encode/1, encode/2, decode/1, decode_next/1]).
 -export([encode_hex/1, decode_hex/1]).
@@ -28,7 +29,11 @@
 -export([prefix_sb32/1]).
 -export([to_sb32/1, from_sb32/1]).
 -export([to_hex/1, from_hex/1]).
+-export([nif_mode/0]).
 
+-ifdef(TEST).
+-export([encode_bin_elems/1, encode_bin_elems_erlang/1]).
+-endif.
 
 -define(negbig   , 8).
 -define(neg4     , 9).
@@ -67,7 +72,27 @@
             true -> io:fwrite("~p: " ++ Fmt, [?LINE|Args]);
             _ -> no_dbg
         end).
+
 %%-define(dbg(F,A),no_debug).
+
+-define(SO_FNAME, "sext").
+-define(SO_DEFAULT_PATH, "../priv").
+
+%% @doc load nifs
+nif_mode() ->
+    SoName = case code:priv_dir(?MODULE) of
+                 {error, bad_name} ->
+                     case code:which(?MODULE) of
+                         Filename when is_list(Filename) ->
+
+                             filename:join([filename:dirname(Filename), ?SO_DEFAULT_PATH, ?SO_FNAME]);
+                         _ ->
+                             filename:join(?SO_DEFAULT_PATH, ?SO_FNAME)
+                     end;
+                 Dir ->
+                     filename:join(Dir, ?SO_FNAME)
+             end,
+    erlang:load_nif(SoName, 0).
 
 %% @spec encode(T::term()) -> binary()
 %% @doc Encodes any Erlang term into a binary.
@@ -216,9 +241,16 @@ chop_prefix_tail(Bin) ->
 %% @end
 %%
 decode(Elems) ->
-    case decode_next(Elems) of
-	{Term, <<>>} -> Term;
-	Other -> erlang:error(badarg, Other)
+    case decode_nif(Elems) of
+        {ok, Term} ->
+            Term;
+        {error, invalid} ->
+            erlang:error(badarg);
+        {error, unsupported} ->
+            case decode_next(Elems) of
+                {Term, <<>>} -> Term;
+                Other -> erlang:error(badarg, Other)
+            end
     end.
 
 %% spec decode_sb32(B::binary()) -> term()
@@ -616,8 +648,17 @@ is_wild(_) ->
 encode_bin_elems(<<>>) ->
     <<8>>;
 encode_bin_elems(B) ->
-    Pad = 8 - (size(B) rem 8),
-    << (<< <<1:1, B1:8>> || <<B1>> <= B >>)/bitstring, 0:Pad, 8 >>.
+    encode_bin_elems(B, <<>>).
+
+encode_bin_elems(<<B:1024/bytes, Rest/binary>>, Acc) ->
+    Enc = encode_bin_elems_nif(B, 0),
+    encode_bin_elems(Rest, <<Acc/binary, Enc/binary>>);
+encode_bin_elems(B, Acc) ->
+    Enc = encode_bin_elems_nif(B, 1),
+    <<Acc/binary, Enc/binary>>.
+
+encode_bin_elems_nif(_B, _End) ->
+    error(nif_not_loaded).
 
 encode_neg_bits(<<>>) ->
     <<247>>;
@@ -700,7 +741,7 @@ decode_next(<<?posbig, Rest/binary>>) -> decode_pos_big(Rest);
 decode_next(<<?neg4, I:31, F:1, Rest/binary>>) -> decode_neg(I,F,Rest);
 decode_next(<<?pos4, I:31, F:1, Rest/binary>>) -> decode_pos(I,F,Rest);
 %% decode_next(<<?old_binary, Rest/binary>>) -> decode_binary(Rest);
-decode_next(<<?binary, Rest/binary>>) -> decode_binary(Rest).
+decode_next(<<?binary, Rest/binary>>) -> decode_binary_maybe_nif(Rest).
 
 -spec partial_decode(binary()) -> {full | partial, any(), binary()}.
 %% @spec partial_decode(Bytes) -> {full | partial, DecodedTerm, Rest}
@@ -970,9 +1011,21 @@ strip_first_one(I) ->
 strip_one(<<0:1, Rest/bitstring>>) -> strip_one(Rest);
 strip_one(<<1:1, Rest/bitstring>>) -> Rest.
 
-
 decode_binary(<<8, Rest/binary>>) ->  {<<>>, Rest};
 decode_binary(B)     ->  decode_binary(B, 0, <<>>).
+
+decode_binary_maybe_nif(<<8, Rest/binary>>) ->  {<<>>, Rest};
+decode_binary_maybe_nif(B)     ->  
+    case decode_binary_nif(B) of
+        fallback -> decode_binary(B, 0, <<>>);
+        Other -> Other
+    end.
+
+decode_binary_nif(_Bin) ->
+    error(nif_not_loaded).
+
+decode_nif(_Bin) ->
+    error(nif_not_loaded).
 
 decode_binary(<<1:1,H:8,Rest/bitstring>>, N, Acc) ->
     case Rest of 
@@ -1129,6 +1182,13 @@ hex2nib(C) when $A =< C, C =< $F -> C - $A + 10.
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
+
+%% Pre-NIF version of encode_bin_elems for comparison
+encode_bin_elems_erlang(<<>>) ->
+    <<8>>;
+encode_bin_elems_erlang(B) ->
+    Pad = 8 - (size(B) rem 8),
+    << (<< <<1:1, B1:8>> || <<B1>> <= B >>)/bitstring, 0:Pad, 8 >>.
 
 encode_test() ->
     L = test_list(),
