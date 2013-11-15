@@ -42,10 +42,11 @@ get_n(Default) ->
     end.
 
 sext_test_() ->
-    N = get_n(500),
-    {timeout, 60,
+    N = get_n(1000),
+    {timeout, 120,
      [
       fun() -> t(run(N, prop_encode, fun prop_encode/0)) end
+      , fun() -> t(run(N, prop_encode_nif, fun prop_encode_nif/0)) end
       , fun() -> t(run(N, prop_decode_legacy_big, fun prop_decode_legacy_big/0)) end
       , fun() -> t(run(N, prop_prefix_equiv,fun prop_prefix_equiv/0))end
       , fun() -> t(run(N, prop_sort, fun prop_sort/0)) end
@@ -80,6 +81,7 @@ good_number_of_tests() ->
 run(Num) ->
     [
      run  (Num, prop_encode , fun prop_encode/0)
+     , run(Num, prop_encode_nif , fun prop_encode_nif/0)
      , run(Num, prop_decode_legacy_big, fun prop_decode_legacy_big/0)
      , run(Num, prop_prefix_equiv,fun prop_prefix_equiv/0)
      %% , run(Num, prop_prefix_equiv,fun prop_prefix_equiv/0)
@@ -159,6 +161,10 @@ prop_sort_neg_fs() ->
 prop_encode() ->
     ?FORALL(T, term_(),
             sext:decode(sext:encode(T)) == T).
+
+prop_encode_nif() ->
+    ?FORALL(B, abin(),
+            sext:encode_bin_elems_erlang(B) == sext:encode_bin_elems(B)).
 
 prop_decode_legacy_big() ->
     ?FORALL(T, big(),
